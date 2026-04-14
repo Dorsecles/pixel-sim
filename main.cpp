@@ -4,7 +4,9 @@
 #include <SFML/Graphics.hpp>
 
 //TODO: Next steps:
-//	- Optimizations for rendering
+//	- Change color of particles drawn via button press
+//	- Make particles fall "naturally" (not just in a straight line)
+//	- Add different types of particles (much more involved change)
 
 unsigned int screen_width = 800;
 unsigned int screen_height = 600;
@@ -14,31 +16,68 @@ int cell_size = 5; // square cells, so only one dimension is needed
 int grid_row_size = screen_width / cell_size;  // 160 (159 w/ zero index)
 int grid_col_size = screen_height / cell_size; // 120 (119 w/ zero index)
 
-std::vector<std::vector<int>> grid(grid_col_size, std::vector<int>(grid_row_size, 0));
+std::vector<int> grid(grid_row_size* grid_col_size, 0);
+std::vector<uint8_t> pixels(screen_width* screen_height * 4, 0); // RGBA pixel buffer for the entire screen
 
-// Draw every active space of the grid to the screen
-void drawGrid(sf::RenderWindow& window)
+// helper function to access specific grid cells
+inline int& cell(int x, int y)
 {
-	sf::RectangleShape rectangle({ (float)cell_size, (float)cell_size });
+	return grid[y * grid_row_size + x];
+}
 
-	for (int y_index = 0; y_index < grid_col_size; ++y_index) {
-		for (int x_index = 0; x_index < grid_row_size; ++x_index) {
-			if (grid[y_index][x_index] == 0) continue;
+// set the RGBA values for the pixel at the specified coordinates
+inline void setPixel(int x, int y, uint8_t r, uint8_t g, uint8_t b, uint8_t a)
+{
+	int index = (y * screen_width + x) * 4; // Calculate the index for RGBA
+	pixels[index] = r;     // Red
+	pixels[index + 1] = g; // Green
+	pixels[index + 2] = b; // Blue
+	pixels[index + 3] = a; // Alpha
+}
 
-			rectangle.setPosition({ static_cast<float>(x_index * cell_size),
-									static_cast<float>(y_index * cell_size) });
+// add pixels that make up a cell of the grid to the texture buffer
+void drawCellToBuffer(int grid_x, int grid_y)
+{
+	int start_x = grid_x * cell_size;
+	int start_y = grid_y * cell_size;
 
-			window.draw(rectangle);
+	for (int dy = 0; dy < cell_size; ++dy)
+	{
+		for (int dx = 0; dx < cell_size; ++dx)
+		{
+			int px = start_x + dx;
+			int py = start_y + dy;
+
+			setPixel(px, py, 255, 255, 255, 255); // white sand
+		}
+	}
+}
+
+// clear pixels that make up a cell of the grid from the texture buffer
+void clearCellFromBuffer(int grid_x, int grid_y)
+{
+	int start_x = grid_x * cell_size;
+	int start_y = grid_y * cell_size;
+
+	for (int dy = 0; dy < cell_size; ++dy)
+	{
+		for (int dx = 0; dx < cell_size; ++dx)
+		{
+			int px = start_x + dx;
+			int py = start_y + dy;
+
+			setPixel(px, py, 0, 0, 0, 255); // black background
 		}
 	}
 }
 
 // Currently draws a single cell to the screen
-void drawScreen(sf::RenderWindow& window)
+void drawScreen(sf::RenderWindow& window, sf::Texture& texture, sf::Sprite& sprite)
 {
+	texture.update(pixels.data());
 
-	window.clear(sf::Color::Black);
-	drawGrid(window);
+	window.clear();
+	window.draw(sprite);
 	window.display();
 }
 
@@ -48,23 +87,15 @@ bool validGridRange(int x_pos, int y_pos)
 		(y_pos < 0 || y_pos >= (grid_col_size)))
 	{
 
-#ifdef DEBUG
-		std::cout << "NOT in range - X: " << x_pos << ", Y: " << y_pos << std::endl;
-#endif
-
 		return false;
 	}
-
-#ifdef DEBUG
-	std::cout << "in range - X: " << x_pos << ", Y: " << y_pos << std::endl;
-#endif
 
 	return true;
 }
 
 bool emptyGridSpace(int x_index, int y_index)
 {
-	if (grid[y_index][x_index] == 0) return true;
+	if (cell(x_index, y_index) == 0) return true;
 	return false;
 }
 
@@ -74,112 +105,142 @@ bool validPositionRange(sf::Vector2i& mouse_pos)
 		(mouse_pos.y < 0 || mouse_pos.y >= screen_height))
 	{
 
-#ifdef DEBUG
-		std::cout << "Mouse position out of bounds: " <<
-			"X: " << mouse_pos.x << ", " <<
-			"Y: " << mouse_pos.y << std::endl;
-#endif
-
 		return false;
 	}
 
 	return true;
 }
 
-void updatePositions(sf::RenderWindow& window)
+void updatePositions(std::vector<sf::Vector2i>& active, std::vector<sf::Vector2i>& next_active)
 {
+	next_active.clear();
+
 	// iterate bottom to top to prevent multiple position updates per frame
-	for (int y_index = grid_col_size - 1; y_index >= 0; --y_index) 
+	for (auto& p : active)
 	{
-		for (int x_index = 0; x_index < grid_row_size; ++x_index) 
+		if (cell(p.x, p.y) == 0) continue;
+
+		bool moved = false;
+
+		// Falling down - check the space directly below the current pixel
+		if (!validGridRange(p.x, p.y + 1))
 		{
-			if (grid[y_index][x_index] == 0) continue;
+			next_active.push_back(p);
+			continue;
+		}
 
-			// Falling down - check the space directly below the current pixel
-			if (!validGridRange(x_index, y_index + 1)) continue;
+		// Unoccupied space below - move down
+		if (emptyGridSpace(p.x, p.y + 1))
+		{
+			// Clear old position (visual)
+			clearCellFromBuffer(p.x, p.y);
 
-			// Unoccupied space below - move down
-			if (emptyGridSpace(x_index, y_index + 1))
+			// Update grid (logic)
+			cell(p.x, p.y) = 0;
+			cell(p.x, p.y + 1) = 1;
+
+			// Draw new position (visual)
+			drawCellToBuffer(p.x, p.y + 1);
+			next_active.push_back({ p.x, p.y + 1 });
+			moved = true;
+		}
+		// Occupied space below - check down-left and down-right
+		else
+		{
+			bool down_left_empty = false;
+			bool down_right_empty = false;
+
+			// Check down-left
+			if (validGridRange(p.x - 1, p.y + 1) && emptyGridSpace(p.x - 1, p.y + 1))
 			{
-				grid[y_index][x_index] = 0;
-				grid[y_index + 1][x_index] = 1;
+				down_left_empty = true;
 			}
-			// Occupied space below - check down-left and down-right
-			else
+
+			// Check down-right
+			if (validGridRange(p.x + 1, p.y + 1) && emptyGridSpace(p.x + 1, p.y + 1))
 			{
-				bool down_left_empty = false;
-				bool down_right_empty = false;
+				down_right_empty = true;
+			}
 
-				// Check down-left
-				if (validGridRange(x_index - 1, y_index + 1) && emptyGridSpace(x_index - 1, y_index + 1))
-				{
-					down_left_empty = true;
-				}
-				
-				// Check down-right
-				if (validGridRange(x_index + 1, y_index + 1) && emptyGridSpace(x_index + 1, y_index + 1))
-				{
-					down_right_empty = true;
-				}
-
-				// If both unoccupied, randomly select one to move into
-				if (down_left_empty && down_right_empty)
-				{
-					if (rand() % 2 == 0)
-					{
-						// fill down_left
-						grid[y_index][x_index] = 0;
-						grid[y_index + 1][x_index - 1] = 1;
-					}
-					else
-					{
-						// fill down_right
-						grid[y_index][x_index] = 0;
-						grid[y_index + 1][x_index + 1] = 1;
-					}
-				}
-				// If one is occupied and the other is unoccupied, move into the unoccupied space
-				else if (!down_left_empty && down_right_empty)
-				{
-					// fill down_right
-					grid[y_index][x_index] = 0;
-					grid[y_index + 1][x_index + 1] = 1;
-				}
-				else if (down_left_empty && !down_right_empty)
+			// If both unoccupied, randomly select one to move into
+			if (down_left_empty && down_right_empty)
+			{
+				if (rand() % 2 == 0)
 				{
 					// fill down_left
-					grid[y_index][x_index] = 0;
-					grid[y_index + 1][x_index - 1] = 1;
+					clearCellFromBuffer(p.x, p.y);
+
+					cell(p.x, p.y) = 0;
+					cell(p.x - 1, p.y + 1) = 1;
+
+					drawCellToBuffer(p.x - 1, p.y + 1);
+					next_active.push_back({ p.x - 1, p.y + 1 });
+					moved = true;
+				}
+				else
+				{
+					// fill down_right
+					clearCellFromBuffer(p.x, p.y);
+
+					cell(p.x, p.y) = 0;
+					cell(p.x + 1, p.y + 1) = 1;
+
+					drawCellToBuffer(p.x + 1, p.y + 1);
+					next_active.push_back({ p.x + 1, p.y + 1 }); // add new position to active list for next frame
+					moved = true;
 				}
 			}
+			// If one is occupied and the other is unoccupied, move into the unoccupied space
+			else if (!down_left_empty && down_right_empty)
+			{
+				// fill down_right
+				clearCellFromBuffer(p.x, p.y);
+
+				cell(p.x, p.y) = 0;
+				cell(p.x + 1, p.y + 1) = 1;
+
+				drawCellToBuffer(p.x + 1, p.y + 1);
+				next_active.push_back({ p.x + 1, p.y + 1 });
+				moved = true;
+			}
+			else if (down_left_empty && !down_right_empty)
+			{
+				// fill down_left
+				clearCellFromBuffer(p.x, p.y);
+
+				cell(p.x, p.y) = 0;
+				cell(p.x - 1, p.y + 1) = 1;
+
+				drawCellToBuffer(p.x - 1, p.y + 1);
+				next_active.push_back({ p.x - 1, p.y + 1 });
+				moved = true;
+			}
+		}
+
+		if (!moved)
+		{
+			next_active.push_back(p);
 		}
 	}
+
+	active.swap(next_active);
 }
 
 // While click held...
-void addPixels(sf::RenderWindow& window)
+void addPixels(sf::RenderWindow& window, std::vector<sf::Vector2i>& active)
 {
-
 	// first get the current position of the mouse relative to the window...
 	sf::Vector2i mouse_pos = sf::Mouse::getPosition(window);
-	
+
 	if (!validPositionRange(mouse_pos)) return;
 
 	// then use integer division to truncate (floor), then multiply by cell size to snap to pixel coordinates
 	sf::Vector2i grid_pos = (mouse_pos / cell_size);
 
-#ifdef DEBUG
-	// Print out coordinates of the mouse relative to the window and grid
-	std::cout << "Window: " <<
-		"X: " << sf::Mouse::getPosition(window).x << ", " <<
-		"Y: " << sf::Mouse::getPosition(window).y << " ";
-	std::cout << "Grid: " <<
-		"X: " << grid_pos.x << ", " <<
-		"Y: " << grid_pos.y << std::endl;
-#endif
-
 	// Set the corresponding grid cell to 1 (indicating it's active)
-	grid[grid_pos.y][grid_pos.x] = 1;
+	cell(grid_pos.x, grid_pos.y) = 1;
+	drawCellToBuffer(grid_pos.x, grid_pos.y);
+	active.push_back({ grid_pos.x, grid_pos.y });
 
 }
 
@@ -198,23 +259,33 @@ void handleEvents(sf::RenderWindow& window)
 
 int main()
 {
-
 	// Set the dimensions, title, and create the window
 	sf::RenderWindow window(sf::VideoMode({ (unsigned)screen_width, (unsigned)screen_height }), "Sand Simulator");
 	window.setFramerateLimit(60);
+
+	sf::Vector2u size({ screen_width, screen_height });
+	sf::Texture texture(size);
+	sf::Sprite sprite(texture);
+
+	std::vector<sf::Vector2i> active_cells;		  // Store the positions of active cells for optimized updates
+	std::vector<sf::Vector2i> next_active_cells;  // Store the positions of cells that will become active in the next frame
+
+	active_cells.push_back({ 80, 10 });
+	cell(80, 10) = 1;
+	drawCellToBuffer(80, 10);
 
 	// master loop
 	while (window.isOpen())
 	{
 		// master event handler - calls event functions as needed
 		handleEvents(window);
-		updatePositions(window);
-		drawScreen(window);
+		updatePositions(active_cells, next_active_cells);
+		drawScreen(window, texture, sprite);
 
 		// handle inputs
 		if (sf::Mouse::isButtonPressed(sf::Mouse::Button::Left))
 		{
-			addPixels(window);
+			addPixels(window, active_cells);
 		}
 	}
 
